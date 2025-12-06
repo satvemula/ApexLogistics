@@ -201,7 +201,7 @@ st.markdown(f"""
 # ==============================================================================
 DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST")
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN")
-MODEL_URI = "models:/workspace.default.apexlogistics/1""
+MODEL_URI = "models:/workspace.default.apexlogistics/1"
 
 if DATABRICKS_HOST and DATABRICKS_TOKEN:
     import mlflow.sklearn
