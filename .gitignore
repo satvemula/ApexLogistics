@@ -1,0 +1,33 @@
+# Streamlit secrets (contains sensitive credentials)
+.streamlit/secrets.toml
+
+# Logs
+*.log
+apex_logistics.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (if sensitive)
+*.csv
+!requirements.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+

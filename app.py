@@ -13,7 +13,7 @@ Enterprise Features:
 - Comprehensive audit logging and monitoring
 
 Author: Apex Logistics Data Science & Engineering
-Version: 3.0.0 Enterprise
+Version: 7.0.0 Enterprise
 Last Updated: 2025-02-14
 """
 
@@ -34,18 +34,53 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # MLflow and model imports
+MLFLOW_AVAILABLE = False
+_mlflow_module = None
 try:
     import mlflow
     import mlflow.sklearn
     MLFLOW_AVAILABLE = True
-except ImportError:
+    _mlflow_module = mlflow
+except ImportError as e:
     MLFLOW_AVAILABLE = False
+    import logging
+    logging.basicConfig(level=logging.WARNING)
+    logging.warning(f"MLflow import failed: {e}")
+
+# Visualization Imports
+import plotly.graph_objects as go
+try:
+    import pydeck as pdk
+    PYDECK_AVAILABLE = True
+except ImportError:
+    PYDECK_AVAILABLE = False
+    logger = logging.getLogger("ApexLogistics")
+    logger.warning("PyDeck not available - falling back to Plotly for maps")
 
 # ==============================================================================
 # ENTERPRISE CONFIGURATION
 # ==============================================================================
 
 # Environment Configuration
+# Load from environment variables (can also use Streamlit secrets in .streamlit/secrets.toml)
+def get_config():
+    """Load configuration from environment variables or Streamlit secrets."""
+    try:
+        # Try Streamlit secrets first
+        secrets = st.secrets.get("DATABRICKS", {})
+        host = secrets.get("host", "") or os.environ.get("DATABRICKS_HOST", "")
+        token = secrets.get("token", "") or os.environ.get("DATABRICKS_TOKEN", "")
+        model_uri = secrets.get("model_uri", "") or os.environ.get("MODEL_URI", "models:/workspace.default.apexlogistics/1")
+        return host, token, model_uri
+    except:
+        # Fallback to environment variables
+        return (
+            os.environ.get("DATABRICKS_HOST", ""),
+            os.environ.get("DATABRICKS_TOKEN", ""),
+            os.environ.get("MODEL_URI", "models:/workspace.default.apexlogistics/1")
+        )
+
+# Initialize with defaults (will be updated in main() if Streamlit secrets available)
 DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 MODEL_URI = os.environ.get("MODEL_URI", "models:/workspace.default.apexlogistics/1")
@@ -53,27 +88,57 @@ DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
 
 # Application Configuration
 APP_NAME = "Apex Logistics Operations Intelligence"
-APP_VERSION = "3.0.0"
+APP_VERSION = "7.0.0"
 MODEL_NAME = "CatBoost_Delay_Classifier_v2"
 MODEL_TRAINING_DATE = "2025-02-14"
 
 # Enterprise Color Palette (Refined Gold & Navy)
-COLORS = {
-    "NAVY": "#0A1F3D",
-    "NAVY_LIGHT": "#1A3A5C",
-    "GOLD": "#C9A961",
-    "GOLD_DARK": "#A68B3D",
-    "GOLD_LIGHT": "#E5D4A3",
-    "WHITE": "#FFFFFF",
-    "GRAY_LIGHT": "#F8F9FA",
-    "GRAY_MEDIUM": "#E9ECEF",
-    "GRAY_DARK": "#6C757D",
-    "SUCCESS": "#28A745",
-    "WARNING": "#FFC107",
-    "DANGER": "#DC3545",
-    "INFO": "#17A2B8",
-    "BLACK": "#212529"
+# Enterprise Color Palettes
+THEMES = {
+    "day": {
+        "NAVY": "#0A1F3D",
+        "NAVY_LIGHT": "#1A3A5C",
+        "GOLD": "#C9A961",
+        "GOLD_DARK": "#A68B3D",
+        "GOLD_LIGHT": "#E5D4A3",
+        "WHITE": "#FFFFFF",
+        "GRAY_LIGHT": "#E2E8F0", # Darkened for better contrast against white cards
+        "GRAY_MEDIUM": "#E9ECEF",
+        "GRAY_DARK": "#6C757D",
+        "SUCCESS": "#28A745",
+        "WARNING": "#FFC107",
+        "DANGER": "#DC3545",
+        "INFO": "#17A2B8",
+        "BLACK": "#212529",
+        "GLASS_BG": "rgba(255, 255, 255, 0.95)", # Increased opacity for better legibility
+        "GLASS_BORDER": "rgba(255, 255, 255, 0.5)",
+        "TEXT_PRIMARY": "#0A1F3D", # Navy for primary text in day
+        "TEXT_SECONDARY": "#6C757D"
+    },
+    "night": {
+        "NAVY": "#0F172A",      # Slate 900
+        "NAVY_LIGHT": "#1E293B", # Slate 800
+        "GOLD": "#38BDF8",       # Sky 400
+        "GOLD_DARK": "#0EA5E9",  # Sky 500
+        "GOLD_LIGHT": "#7DD3FC", # Sky 300
+        "WHITE": "#1E293B",      # Slate 800 (Card Bg)
+        "GRAY_LIGHT": "#020617", # Slate 950 (Deep background)
+        "GRAY_MEDIUM": "#334155",# Slate 700
+        "GRAY_DARK": "#CBD5E1",  # Slate 300 (Lightened for readability)
+        "SUCCESS": "#4ADE80",    # Green 400
+        "WARNING": "#FACC15",    # Yellow 400
+        "DANGER": "#F87171",     # Red 400
+        "INFO": "#22D3EE",       # Cyan 400
+        "BLACK": "#F8FAFC",      # Slate 50 (Text)
+        "GLASS_BG": "rgba(30, 41, 59, 0.8)",
+        "GLASS_BORDER": "rgba(255, 255, 255, 0.1)",
+        "TEXT_PRIMARY": "#F8FAFC", # White/Slate 50 for primary text in night
+        "TEXT_SECONDARY": "#CBD5E1" # Slate 300
+    }
 }
+
+# Initialize default colors (will be updated by session state)
+COLORS = THEMES["day"]
 
 # Model Configuration
 EXPECTED_FEATURE_COUNT = 252
@@ -117,26 +182,65 @@ logger = setup_logging()
 # MODEL LOADING & MANAGEMENT
 # ==============================================================================
 
-@st.cache_resource(show_spinner=False)
-def load_model() -> Optional[Any]:
+@st.cache_resource(show_spinner="Connecting to Databricks and loading model...")
+def load_model(host: str, token: str, model_uri: str) -> Optional[Any]:
     """Load trained model from Databricks MLflow with enterprise error handling."""
-    if not MLFLOW_AVAILABLE:
-        logger.warning("MLflow not available - running in demonstration mode")
+    # Try importing MLflow at runtime (in case it was installed after app start)
+    try:
+        import mlflow
+        import mlflow.sklearn
+    except ImportError as e:
+        logger.error(f"MLflow import failed at runtime: {e}")
+        logger.error(f"Python path: {sys.executable}")
         return None
     
-    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-        logger.warning("Databricks credentials not configured - demonstration mode")
+    if not host or not token:
+        logger.warning(f"Databricks credentials missing - host: {bool(host)}, token: {bool(token)}")
         return None
     
     try:
+        # Set credentials in environment
+        os.environ["DATABRICKS_HOST"] = host
+        os.environ["DATABRICKS_TOKEN"] = token
+        
+        logger.info(f"Connecting to Databricks: {host}")
+        logger.info(f"Loading model from: {model_uri}")
+        
         mlflow.set_tracking_uri("databricks")
-        logger.info(f"Loading model from: {MODEL_URI}")
-        model = mlflow.sklearn.load_model(MODEL_URI)
-        logger.info("Model loaded successfully")
-        return model
+        
+        # Try loading the model
+        try:
+            model = mlflow.sklearn.load_model(model_uri)
+            logger.info("Model loaded successfully from Databricks")
+            return model
+        except Exception as model_error:
+            # If model URI format is wrong, provide helpful error
+            error_msg = str(model_error)
+            logger.error(f"Model loading failed: {error_msg}")
+            
+            if "Invalid model id" in error_msg or "must start with 'm-'" in error_msg:
+                st.error(f"""
+                **Model URI Format Error**
+                
+                The model URI `{model_uri}` is incorrect.
+                
+                **Correct formats:**
+                - `models:/<model_name>/<version>` (e.g., `models:/apexlogistics/1`)
+                - `models:/<model_name>/Staging` or `models:/<model_name>/Production`
+                - Full run URI: `runs:/<run_id>/model`
+                
+                Please check your Databricks MLflow Model Registry and update the `model_uri` in `.streamlit/secrets.toml`
+                """)
+            else:
+                st.error(f"Failed to load model: {error_msg}")
+            
+            logger.error(traceback.format_exc())
+            return None
+            
     except Exception as e:
-        logger.error(f"Model loading failed: {str(e)}")
+        logger.error(f"Connection failed: {str(e)}")
         logger.error(traceback.format_exc())
+        st.error(f"Failed to connect to Databricks: {str(e)}")
         return None
 
 # ==============================================================================
@@ -233,7 +337,7 @@ def apply_enterprise_styling():
     html, body, [data-testid="stAppViewContainer"] {{
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
         background-color: {COLORS['GRAY_LIGHT']};
-        color: {COLORS['BLACK']};
+        color: {COLORS['TEXT_PRIMARY']};
         line-height: 1.6;
     }}
 
@@ -248,13 +352,39 @@ def apply_enterprise_styling():
         display: none;
     }}
 
-    /* Enterprise Header Bar */
+    /* Glassmorphism Cards */
+    .glass-card {{
+        background: {COLORS['GLASS_BG']};
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid {COLORS['GLASS_BORDER']};
+        box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+        border-radius: 12px;
+        padding: 2rem;
+        margin-bottom: 2rem;
+        transition: all 0.3s ease;
+    }}
+
+    .glass-card:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 12px 40px 0 rgba(31, 38, 135, 0.25);
+    }}
+
+    /* Enterprise Header Bar - COMPACT SINGLE LINE */
     .enterprise-header {{
-        background: linear-gradient(135deg, {COLORS['NAVY']} 0%, {COLORS['NAVY_LIGHT']} 100%);
-        padding: 1.5rem 2rem;
-        margin: -1rem -1rem 2rem -1rem;
-        border-bottom: 3px solid {COLORS['GOLD']};
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        /* Use the base navy color as requested */
+        background-color: {COLORS['NAVY']}; 
+        padding: 0.5rem 1.5rem; /* Highly compacted padding */
+        margin: -1rem -1rem 1rem -1rem; 
+        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        
+        /* New: Flexbox to manage internal layout cleanly */
+        display: flex;
+        align-items: center; /* Vertically center the content */
+        justify-content: space-between; /* Push content to edges */
+        
+        /* Added the gold border back to the bottom of the content container */
+        border-bottom: 2px solid {COLORS['GOLD']}; 
     }}
 
     .enterprise-header h1 {{
@@ -297,7 +427,7 @@ def apply_enterprise_styling():
     }}
 
     .kpi-label {{
-        color: {COLORS['GRAY_DARK']};
+        color: {COLORS['TEXT_SECONDARY']};
         font-size: 0.85rem;
         font-weight: 500;
         text-transform: uppercase;
@@ -306,7 +436,7 @@ def apply_enterprise_styling():
     }}
 
     .kpi-value {{
-        color: {COLORS['NAVY']};
+        color: {COLORS['TEXT_PRIMARY']};
         font-size: 2rem;
         font-weight: 700;
         font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
@@ -330,7 +460,7 @@ def apply_enterprise_styling():
     }}
 
     .card-title {{
-        color: {COLORS['NAVY']};
+        color: {COLORS['TEXT_PRIMARY']};
         font-size: 1.25rem;
         font-weight: 600;
         margin-bottom: 1.5rem;
@@ -361,57 +491,132 @@ def apply_enterprise_styling():
     .stNumberInput > div > div > input {{
         border: 1px solid {COLORS['GRAY_MEDIUM']};
         border-radius: 4px;
+        color: {COLORS['TEXT_PRIMARY']};
     }}
 
     .stSelectbox > div > div > select {{
         border: 1px solid {COLORS['GRAY_MEDIUM']};
         border-radius: 4px;
+        color: {COLORS['TEXT_PRIMARY']};
     }}
 
     /* Metrics Styling */
     [data-testid="stMetricValue"] {{
-        color: {COLORS['NAVY']} !important;
+        color: {COLORS['TEXT_PRIMARY']} !important;
         font-weight: 700;
     }}
 
     [data-testid="stMetricLabel"] {{
-        color: {COLORS['GRAY_DARK']} !important;
+        color: {COLORS['TEXT_SECONDARY']} !important;
         font-weight: 500;
     }}
 
     /* Sidebar Professional Styling */
-    .css-1d391kg {{
-        background-color: {COLORS['WHITE']};
+    /* Sidebar Professional Styling */
+    section[data-testid="stSidebar"] {{
+        background-color: {COLORS['NAVY']}; /* Company Blue */
+        border-right: 1px solid {COLORS['GOLD']}; /* Company Gold Border */
     }}
 
-    .css-1lcbmhc {{
-        background-color: {COLORS['WHITE']};
+    /* Sidebar Text & Headers */
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] h4,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stMarkdown,
+    section[data-testid="stSidebar"] p {{
+        color: {COLORS['WHITE']} !important;
+    }}
+
+    /* Specific fix for Radio Buttons in Sidebar */
+    section[data-testid="stSidebar"] .stRadio label {{
+        color: {COLORS['WHITE']} !important;
+    }}
+    
+    section[data-testid="stSidebar"] .stRadio div[role="radiogroup"] {{
+        color: {COLORS['WHITE']} !important;
     }}
 
     /* Remove emoji styling issues */
     .stMarkdown {{
-        color: {COLORS['BLACK']} !important;
+        color: {COLORS['TEXT_PRIMARY']} !important;
     }}
 
-    /* Professional Info Boxes */
+    /* Ensure form labels and titles are visible */
+    .stMarkdown h4 {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+        background-color: transparent !important;
+    }}
+
+    /* Ensure all Streamlit labels are visible */
+    label {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+    }}
+
+    /* Input field labels - make them black and visible */
+    .stNumberInput label,
+    .stSelectbox label,
+    .stTextInput label,
+    .stTextArea label {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+        font-weight: 500 !important;
+    }}
+
+    /* Streamlit widget labels */
+    [data-testid="stWidgetLabel"] {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+    }}
+
+    /* All p elements in forms */
+    .element-container p {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+    }}
+
+    /* Plotly chart text visibility */
+    .js-plotly-plot {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
+    }}
+
+    /* Professional Info Boxes - High Contrast */
     .stInfo {{
         background-color: {COLORS['GRAY_LIGHT']};
         border-left: 4px solid {COLORS['INFO']};
+        color: {COLORS['TEXT_PRIMARY']} !important;
+    }}
+
+    .stInfo p, .stInfo div {{
+        color: {COLORS['TEXT_PRIMARY']} !important;
     }}
 
     .stSuccess {{
         background-color: #d4edda;
         border-left: 4px solid {COLORS['SUCCESS']};
+        color: #155724 !important;
+    }}
+
+    .stSuccess p, .stSuccess div, .stSuccess strong {{
+        color: #155724 !important;
     }}
 
     .stWarning {{
         background-color: #fff3cd;
         border-left: 4px solid {COLORS['WARNING']};
+        color: #856404 !important;
+    }}
+
+    .stWarning p, .stWarning div, .stWarning strong {{
+        color: #856404 !important;
     }}
 
     .stError {{
         background-color: #f8d7da;
         border-left: 4px solid {COLORS['DANGER']};
+        color: #721c24 !important;
+    }}
+
+    .stError p, .stError div, .stError strong {{
+        color: #721c24 !important;
     }}
 
     /* Professional Tables */
@@ -428,29 +633,78 @@ def apply_enterprise_styling():
     """, unsafe_allow_html=True)
 
 def render_enterprise_header():
-    """Render professional enterprise header."""
+    """Render compact single-line header."""
     current_time = datetime.now().strftime("%B %d, %Y | %I:%M %p")
-    st.markdown(f"""
-    <div class="enterprise-header">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <h1>APEX LOGISTICS</h1>
-                <p>Operations Intelligence Platform</p>
-            </div>
-            <div style="text-align: right; color: {COLORS['GOLD_LIGHT']};">
-                <div style="font-size: 0.85rem; font-weight: 300;">{current_time}</div>
-                <div style="font-size: 0.75rem; margin-top: 0.25rem; opacity: 0.8;">Version {APP_VERSION}</div>
-            </div>
-        </div>
+    
+    st.markdown(f"""<div class="enterprise-header">
+    <div style="display: flex; align-items: center; gap: 1rem;">
+        <h1 style="color: {COLORS['WHITE']}; font-size: 1.25rem; font-weight: 700; margin: 0; white-space: nowrap;">
+            APEX LOGISTICS
+        </h1>
+        <div style="width: 1px; height: 20px; background: {COLORS['GOLD']}; opacity: 0.5;"></div>
+        <p style="color: {COLORS['GOLD_LIGHT']}; font-size: 0.9rem; margin: 0; font-weight: 300; white-space: nowrap;">
+            Operations Intelligence Platform
+        </p>
     </div>
-    """, unsafe_allow_html=True)
+    <div style="text-align: right;">
+        <div style="color: {COLORS['WHITE']}; font-size: 0.85rem; font-weight: 400;">{current_time}</div>
+        <div style="color: {COLORS['GOLD_LIGHT']}; font-size: 0.75rem; opacity: 0.8;">v{APP_VERSION}</div>
+    </div>
+</div>""", unsafe_allow_html=True)
 
-def render_sidebar(model: Optional[Any]):
-    """Render professional sidebar with system information."""
+def render_sidebar(model: Optional[Any], current_theme: str) -> str:
+    """Render professional sidebar with system information and theme toggle."""
     with st.sidebar:
+        # Theme Toggle
         st.markdown(f"""
-        <div style="padding: 1rem 0; border-bottom: 1px solid {COLORS['GRAY_MEDIUM']}; margin-bottom: 1.5rem;">
-            <h3 style="color: {COLORS['NAVY']}; font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">
+        <div style="padding: 1rem 0; border-bottom: 1px solid {COLORS['GOLD_DARK']}; margin-bottom: 1.5rem;">
+            <h3 style="color: {COLORS['WHITE']}; font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">
+                Interface Settings
+            </h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Theme toggle using radio button for simplicity (can be styled better later)
+        theme_options = ["Day Mode", "Night Mode"]
+        default_index = 0 if current_theme == "day" else 1
+        
+        selected_theme_label = st.radio(
+            "Color Theme",
+            options=theme_options,
+            index=default_index,
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+        
+        new_theme = "day" if selected_theme_label == "Day Mode" else "night"
+        
+        if new_theme != current_theme:
+            st.session_state["theme"] = new_theme
+            st.rerun()
+
+        # View Mode Toggle
+        st.markdown(f"""
+        <div style="margin-top: 1.5rem;">
+            <label style="color: {COLORS['GOLD']}; font-weight: 600; font-size: 0.9rem;">View Mode</label>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        view_mode = st.radio(
+            "View Mode Details",
+            options=["Executive", "Analyst"],
+            index=0 if st.session_state.get("role", "Executive") == "Executive" else 1,
+            label_visibility="collapsed",
+            key="role_selector"
+        )
+        
+        role = view_mode.lower()
+        if role != st.session_state.get("role", "executive"):
+            st.session_state["role"] = role
+            st.rerun()
+            
+        st.markdown(f"""
+        <div style="padding: 1rem 0; border-bottom: 1px solid {COLORS['GOLD_DARK']}; margin-bottom: 1.5rem;">
+            <h3 style="color: {COLORS['WHITE']}; font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">
                 System Status
             </h3>
         </div>
@@ -460,15 +714,15 @@ def render_sidebar(model: Optional[Any]):
         if model:
             st.markdown(f"""
             <div style="background: #d4edda; padding: 1rem; border-radius: 4px; border-left: 4px solid {COLORS['SUCCESS']}; margin-bottom: 1rem;">
-                <div style="color: {COLORS['BLACK']}; font-weight: 600; margin-bottom: 0.25rem;">Operational</div>
-                <div style="color: {COLORS['GRAY_DARK']}; font-size: 0.85rem;">Model connected to Databricks</div>
+                <div style="color: #155724; font-weight: 600; margin-bottom: 0.25rem;">Operational</div>
+                <div style="color: #155724; font-size: 0.85rem;">Model connected to Databricks</div>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background: #fff3cd; padding: 1rem; border-radius: 4px; border-left: 4px solid {COLORS['WARNING']}; margin-bottom: 1rem;">
-                <div style="color: {COLORS['BLACK']}; font-weight: 600; margin-bottom: 0.25rem;">Demonstration Mode</div>
-                <div style="color: {COLORS['GRAY_DARK']}; font-size: 0.85rem;">Using simulated predictions</div>
+                <div style="color: #856404; font-weight: 600; margin-bottom: 0.25rem;">Demonstration Mode</div>
+                <div style="color: #856404; font-size: 0.85rem;">Using simulated predictions</div>
             </div>
             """, unsafe_allow_html=True)
         
@@ -502,7 +756,7 @@ def render_sidebar(model: Optional[Any]):
         </div>
         """, unsafe_allow_html=True)
 
-def render_kpi_dashboard():
+def render_kpi_dashboard(role: str = "executive"):
     """Render executive KPI dashboard with professional metrics."""
     # Generate realistic enterprise metrics
     base_date = datetime.now()
@@ -518,16 +772,16 @@ def render_kpi_dashboard():
     risk_change = -12
     time_change = -18
     
-    st.markdown('<div class="kpi-dashboard">', unsafe_allow_html=True)
-    st.markdown(f'<div class="card-title">Operational Performance Metrics</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="card-title" style="color: {COLORS["TEXT_PRIMARY"]}; border-bottom-color: {COLORS["GOLD"]};">Operational Performance Metrics</div>', unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">On-Time Performance</div>
-            <div class="kpi-value">{on_time_rate:.1f}%</div>
+        <div>
+            <div class="kpi-label" style="color: {COLORS['TEXT_SECONDARY']};">On-Time Performance</div>
+            <div class="kpi-value" style="color: {COLORS['NAVY']};">{on_time_rate:.1f}%</div>
             <div class="kpi-change" style="color: {COLORS['SUCCESS']};">
                 ▲ {on_time_change:.1f}% vs previous period
             </div>
@@ -536,10 +790,10 @@ def render_kpi_dashboard():
     
     with col2:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">High-Risk Shipments</div>
-            <div class="kpi-value">{shipments_at_risk}</div>
-            <div class="kpi-change" style="color: {COLORS['SUCCESS']};">
+        <div>
+            <div class="kpi-label" style="color: {COLORS['TEXT_SECONDARY']};">High-Risk Shipments</div>
+            <div class="kpi-value" style="color: {COLORS['NAVY']};">{shipments_at_risk}</div>
+            <div class="kpi-change" style="color: {COLORS['NAVY']};">
                 ▼ {abs(risk_change)} fewer than last week
             </div>
         </div>
@@ -547,10 +801,10 @@ def render_kpi_dashboard():
     
     with col3:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">Average Transit Time</div>
-            <div class="kpi-value">{avg_planned_time:,} min</div>
-            <div class="kpi-change" style="color: {COLORS['SUCCESS']};">
+        <div>
+            <div class="kpi-label" style="color: {COLORS['TEXT_SECONDARY']};">Average Transit Time</div>
+            <div class="kpi-value" style="color: {COLORS['NAVY']};">{avg_planned_time:,} min</div>
+            <div class="kpi-change" style="color: {COLORS['NAVY']};">
                 ▼ {abs(time_change)} min improvement
             </div>
         </div>
@@ -558,10 +812,10 @@ def render_kpi_dashboard():
     
     with col4:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">Active Shipments</div>
-            <div class="kpi-value">{active_shipments:,}</div>
-            <div class="kpi-change" style="color: {COLORS['INFO']};">
+        <div>
+            <div class="kpi-label" style="color: {COLORS['TEXT_SECONDARY']};">Active Shipments</div>
+            <div class="kpi-value" style="color: {COLORS['NAVY']};">{active_shipments:,}</div>
+            <div class="kpi-change" style="color: {COLORS['GOLD_DARK']};">
                 {active_shipments - 3723} new today
             </div>
         </div>
@@ -569,16 +823,16 @@ def render_kpi_dashboard():
     
     st.markdown('</div>', unsafe_allow_html=True)
 
-def render_prediction_interface(model: Optional[Any]):
+def render_prediction_interface(model: Optional[Any], role: str = "executive"):
     """Render professional prediction interface."""
-    st.markdown('<div class="enterprise-card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">Shipment Risk Assessment</div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="card-title" style="color: {COLORS["TEXT_PRIMARY"]}; border-bottom-color: {COLORS["GOLD"]};">Shipment Risk Assessment</div>', unsafe_allow_html=True)
     
     with st.form("prediction_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown(f"<h4 style='color: {COLORS['NAVY']}; font-size: 1rem; font-weight: 600; margin-bottom: 1rem;'>Journey Configuration</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='color: {COLORS['NAVY']}; font-size: 1rem; font-weight: 600; margin-bottom: 1rem; background-color: {COLORS['WHITE']}; padding: 0.5rem; border-left: 3px solid {COLORS['GOLD']};'>Journey Configuration</h4>", unsafe_allow_html=True)
             legs = st.number_input(
                 "Total Journey Legs",
                 min_value=INPUT_RANGES["legs"][0],
@@ -602,7 +856,7 @@ def render_prediction_interface(model: Optional[Any]):
             )
         
         with col2:
-            st.markdown(f"<h4 style='color: {COLORS['NAVY']}; font-size: 1rem; font-weight: 600; margin-bottom: 1rem;'>Route Details</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='color: {COLORS['NAVY']}; font-size: 1rem; font-weight: 600; margin-bottom: 1rem; background-color: {COLORS['WHITE']}; padding: 0.5rem; border-left: 3px solid {COLORS['GOLD']};'>Route Details</h4>", unsafe_allow_html=True)
             o_hops = st.number_input(
                 "Outbound Transfer Points",
                 min_value=INPUT_RANGES["o_hops"][0],
@@ -643,19 +897,23 @@ def render_prediction_interface(model: Optional[Any]):
                 feature_df = preprocess_inputs(legs, rcs_p, i_hops, o_hops, dep1, dep2)
                 
                 if model:
+                    logger.info("Using real model for prediction")
                     delay_risk, predicted_class, class_probs = predict_delay_risk(model, feature_df)
+                    st.success("✓ Prediction generated using ML model")
                 else:
+                    logger.warning("Model is None - using mock prediction")
                     # Realistic mock prediction
                     delay_risk = 0.68
                     predicted_class = 1
                     class_probs = {"Single Leg": 0.22, "Two Leg": 0.58, "Multi-Leg": 0.20}
+                    st.warning("⚠️ Using simulated prediction (model not loaded)")
                 
-                render_prediction_results(delay_risk, predicted_class, class_probs, legs, rcs_p)
+                render_prediction_results(delay_risk, predicted_class, class_probs, legs, rcs_p, role)
                 
             except Exception as e:
                 logger.error(f"Prediction failed: {str(e)}")
                 st.error(f"Analysis Error: {str(e)}")
-                if DEBUG_MODE:
+                if DEBUG_MODE or role == "analyst":
                     st.exception(e)
     
     st.markdown('</div>', unsafe_allow_html=True)
@@ -665,7 +923,8 @@ def render_prediction_results(
     predicted_class: int,
     class_probs: Dict[str, float],
     legs: int,
-    rcs_p: int
+    rcs_p: int,
+    role: str = "executive"
 ):
     """Render professional prediction results."""
     st.markdown("---")
@@ -675,14 +934,17 @@ def render_prediction_results(
         risk_level = "HIGH RISK"
         risk_color = COLORS['DANGER']
         risk_bg = "#f8d7da"
+        risk_text_color = "#721c24"
     elif delay_risk > 0.5:
         risk_level = "ELEVATED RISK"
         risk_color = COLORS['WARNING']
         risk_bg = "#fff3cd"
+        risk_text_color = "#856404"
     else:
         risk_level = "STANDARD RISK"
         risk_color = COLORS['SUCCESS']
         risk_bg = "#d4edda"
+        risk_text_color = "#155724"
     
     col1, col2 = st.columns([1, 2])
     
@@ -690,14 +952,14 @@ def render_prediction_results(
         st.markdown(f"""
         <div style="background: {risk_bg}; border-left: 4px solid {risk_color};
                     padding: 2rem; border-radius: 4px; text-align: center;">
-            <div style="color: {COLORS['GRAY_DARK']}; font-size: 0.85rem; font-weight: 600; 
+            <div style="color: {risk_text_color}; font-size: 0.85rem; font-weight: 600; 
                         text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 1rem;">
                 Risk Classification
             </div>
-            <div style="color: {risk_color}; font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">
+            <div style="color: {risk_text_color}; font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">
                 {risk_level}
             </div>
-            <div style="color: {COLORS['BLACK']}; font-size: 1.5rem; font-weight: 600;">
+            <div style="color: {risk_text_color}; font-size: 1.5rem; font-weight: 600;">
                 {delay_risk:.1%} Probability
             </div>
         </div>
@@ -716,7 +978,7 @@ def render_prediction_results(
             x="Journey Type",
             y="Probability",
             color="Probability",
-            color_continuous_scale=[COLORS['SUCCESS'], COLORS['WARNING'], COLORS['DANGER']],
+            color_continuous_scale=[COLORS['GOLD_LIGHT'], COLORS['GOLD'], COLORS['GOLD_DARK']],
             text="Probability"
         )
         fig.update_traces(
@@ -731,169 +993,202 @@ def render_prediction_results(
             paper_bgcolor='white',
             font=dict(color=COLORS['BLACK'], size=12),
             showlegend=False,
-            yaxis=dict(tickformat=".0%", gridcolor=COLORS['GRAY_MEDIUM'], title=""),
-            xaxis=dict(title="")
+            yaxis=dict(
+                tickformat=".0%", 
+                gridcolor=COLORS['GRAY_MEDIUM'], 
+                title="Probability",
+                title_font=dict(color=COLORS['BLACK'], size=12),
+                tickfont=dict(color=COLORS['BLACK'], size=10),
+            ),
+            xaxis=dict(
+                title="Predicted Shipment Journey Type",
+                title_font=dict(color=COLORS['BLACK'], size=12),
+                tickfont=dict(color=COLORS['BLACK'], size=10),
+            ),
+            margin=dict(t=20, l=40, r=40, b=40)
         )
-        st.plotly_chart(fig, use_container_width=True)
         
-        # Analysis Summary
-        if rcs_p > 2000:
-            insight = "Extended check-in time indicates potential operational constraints."
-        elif legs >= 2:
-            insight = "Multi-leg configuration increases complexity and requires additional monitoring."
-        else:
-            insight = "Standard configuration with expected operational parameters."
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         
-        st.info(f"**Analysis Summary:** {insight}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-def render_analytics_dashboard():
-    """Render professional analytics dashboard."""
-    st.markdown('<div class="enterprise-card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">Operational Analytics</div>', unsafe_allow_html=True)
-    
-    # Generate realistic time series data
-    dates = pd.date_range(start=datetime.now() - timedelta(days=30), periods=30, freq='D')
-    np.random.seed(42)
-    delay_rates = np.random.normal(0.12, 0.03, 30).clip(0.05, 0.25)
-    volumes = np.random.normal(4200, 500, 30).clip(3000, 5500)
-    
-    chart_data = pd.DataFrame({
-        "Date": dates,
-        "Delay Rate": delay_rates,
-        "Volume": volumes
-    })
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown(f"<h4 style='color: {COLORS['NAVY']}; margin-bottom: 1rem;'>30-Day Delay Trend</h4>", unsafe_allow_html=True)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=chart_data['Date'],
-            y=chart_data['Delay Rate'],
-            mode='lines',
-            name='Delay Rate',
-            line=dict(color=COLORS['NAVY'], width=2.5),
-            fill='tozeroy',
-            fillcolor=f"rgba(10, 31, 61, 0.1)"
-        ))
-        fig.add_hline(
-            y=0.15,
-            line_dash="dash",
-            line_color=COLORS['WARNING'],
-            annotation_text="Target Threshold"
-        )
-        fig.update_layout(
-            height=350,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color=COLORS['BLACK']),
-            yaxis=dict(tickformat=".1%", gridcolor=COLORS['GRAY_MEDIUM'], title="Delay Rate"),
-            xaxis=dict(title="Date", gridcolor=COLORS['GRAY_MEDIUM'])
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.markdown(f"<h4 style='color: {COLORS['NAVY']}; margin-bottom: 1rem;'>Shipment Volume</h4>", unsafe_allow_html=True)
-        fig = px.bar(
-            chart_data,
-            x='Date',
-            y='Volume',
-            color='Volume',
-            color_continuous_scale=[COLORS['GOLD_LIGHT'], COLORS['GOLD']]
-        )
-        fig.update_layout(
-            height=350,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color=COLORS['BLACK']),
-            showlegend=False,
-            yaxis=dict(gridcolor=COLORS['GRAY_MEDIUM'], title="Shipments"),
-            xaxis=dict(title="Date", gridcolor=COLORS['GRAY_MEDIUM'])
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+# ==============================================================================
+# ADVANCED VISUALIZATIONS
+# ==============================================================================
 
-def render_feature_importance():
-    """Render professional feature importance visualization."""
-    st.markdown('<div class="enterprise-card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">Model Interpretability</div>', unsafe_allow_html=True)
+def render_geospatial_map(dep1: int, dep2: int):
+    """Render 3D Arc Layer map using PyDeck."""
+    st.markdown(f'<div class="card-title" style="color: {COLORS["TEXT_PRIMARY"]}; border-bottom-color: {COLORS["GOLD"]};">Global Logistics Network</div>', unsafe_allow_html=True)
     
-    feature_data = {
-        "Feature": ["Origin Facility", "Check-In Time", "Destination Facility", "Inbound Transfers", "Outbound Transfers", "Journey Legs"],
-        "Importance": [0.211, 0.187, 0.142, 0.095, 0.078, 0.055]
+    # Facility Coordinates (Demo Data)
+    FACILITIES = {
+        100: {"name": "JFK Hub", "lat": 40.6413, "lon": -73.7781},
+        240: {"name": "LAX Gateway", "lat": 33.9416, "lon": -118.4085},
+        540: {"name": "LHR Center", "lat": 51.4700, "lon": -0.4543},
+        560: {"name": "DXB Transit", "lat": 25.2532, "lon": 55.3657},
+        700: {"name": "HKG Port", "lat": 22.3080, "lon": 113.9185},
+        815: {"name": "SYD Hub", "lat": -33.9399, "lon": 151.1753}
     }
     
-    df_imp = pd.DataFrame(feature_data)
+    # Get coordinates for selected route
+    origin = FACILITIES.get(dep1, FACILITIES[100])
+    dest = FACILITIES.get(dep2, FACILITIES[540])
     
-    fig = px.bar(
-        df_imp.sort_values('Importance', ascending=True),
-        x='Importance',
-        y='Feature',
-        orientation='h',
-        color='Importance',
-        color_continuous_scale=[COLORS['GOLD_LIGHT'], COLORS['GOLD']],
-        text='Importance'
-    )
-    fig.update_traces(
-        texttemplate='%{text:.3f}',
-        textposition='outside',
-        marker_line_color=COLORS['NAVY'],
-        marker_line_width=1
-    )
+    # Generate arcs for all facilities to show network
+    arcs_data = [
+        {"source": [FACILITIES[100]["lon"], FACILITIES[100]["lat"]], "target": [FACILITIES[540]["lon"], FACILITIES[540]["lat"]], "value": 10},
+        {"source": [FACILITIES[240]["lon"], FACILITIES[240]["lat"]], "target": [FACILITIES[700]["lon"], FACILITIES[700]["lat"]], "value": 5},
+        {"source": [FACILITIES[560]["lon"], FACILITIES[560]["lat"]], "target": [FACILITIES[815]["lon"], FACILITIES[815]["lat"]], "value": 3},
+        # Active Route
+        {"source": [origin["lon"], origin["lat"]], "target": [dest["lon"], dest["lat"]], "value": 20, "color": [201, 169, 97, 255]} # Gold
+    ]
+    
+    if PYDECK_AVAILABLE:
+        view_state = pdk.ViewState(
+            latitude=20.0,
+            longitude=0.0,
+            zoom=1,
+            pitch=45,
+        )
+        
+        layer = pdk.Layer(
+            "ArcLayer",
+            data=arcs_data,
+            get_source_position="source",
+            get_target_position="target",
+            get_width="value",
+            get_tilt=15,
+            get_source_color=[10, 31, 61, 150],  # Navy transparent
+            get_target_color=[255, 0, 0, 255] if "color" not in arcs_data[-1] else [201, 169, 97, 255],
+            pickable=True,
+            auto_highlight=True,
+        )
+        
+        r = pdk.Deck(
+            map_style="mapbox://styles/mapbox/light-v9" if st.session_state["theme"] == "day" else "mapbox://styles/mapbox/dark-v10",
+            initial_view_state=view_state,
+            layers=[layer],
+            tooltip=True
+        )
+        
+        st.pydeck_chart(r)
+    else:
+        # Fallback to simple Plotly scattergeo
+        st.info("Interactive 3D Map requires PyDeck. Showing static view.")
+        
+def render_sankey_diagram():
+    """Render Sankey diagram of Shipment Flows."""
+    st.markdown(f'<div class="card-title" style="color: {COLORS["TEXT_PRIMARY"]}; border-bottom-color: {COLORS["GOLD"]};">Shipment Flow Distribution</div>', unsafe_allow_html=True)
+    
+    fig = go.Figure(data=[go.Sankey(
+        node = dict(
+          pad = 15,
+          thickness = 20,
+          line = dict(color = "black", width = 0.5),
+          label = ["Origin: JFK", "Origin: LAX", "Hub: London", "Hub: Dubai", "Dest: Hong Kong", "Dest: Sydney"],
+          color = [COLORS['NAVY_LIGHT']] * 6
+        ),
+        link = dict(
+          source = [0, 1, 0, 2, 3, 3], # indices correspond to labels
+          target = [2, 3, 3, 4, 4, 5],
+          value =  [8, 4, 2, 8, 4, 2],
+          color = [COLORS['GOLD_LIGHT']] * 6
+      ))])
+    
     fig.update_layout(
-        height=350,
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(color=COLORS['BLACK']),
-        showlegend=False,
-        xaxis=dict(title="Importance Score", gridcolor=COLORS['GRAY_MEDIUM']),
-        yaxis=dict(title="")
+        font=dict(size=12, color=COLORS['TEXT_PRIMARY']),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=20, b=20)
     )
-    st.plotly_chart(fig, use_container_width=True)
     
+    st.plotly_chart(fig, use_container_width=True)
+
+def render_advanced_visualizations(role: str):
+    """Render advanced visualizations based on role."""
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    
+    if role == "executive":
+        render_sankey_diagram()
+    else:
+        # Analysts see the map
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            render_geospatial_map(100, 540) # Default demo route
+        with col2:
+             st.markdown(f"""
+             <div style="background: {COLORS['GRAY_LIGHT']}; padding: 1.5rem; border-radius: 8px;">
+                 <h4 style="color: {COLORS['NAVY']}; margin-top: 0;">Network Status</h4>
+                 <p style="font-size: 0.9rem;">Global hub connectivity is operating at 98% efficiency. 
+                 Major congestion reported in EU sector.</p>
+                 <div style="margin-top: 1rem; border-top: 1px solid {COLORS['GRAY_MEDIUM']}; padding-top: 1rem;">
+                    <strong>Active Alerts:</strong><br>
+                    • LHR: Weather Delay<br>
+                    • DXB: Capacity Warning
+                 </div>
+             </div>
+             """, unsafe_allow_html=True)
+            
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ==============================================================================
-# MAIN APPLICATION
-# ==============================================================================
-
 def main():
-    """Main application entry point."""
+    """Main application function."""
+    
+    # Initialize Session State for Theme
+    if "theme" not in st.session_state:
+        st.session_state["theme"] = "day"
+    
+    # Initialize Session State for Role
+    if "role" not in st.session_state:
+        st.session_state["role"] = "executive"
+
+    # Update Global Colors based on Theme
+    global COLORS
+    COLORS = THEMES[st.session_state["theme"]]
+    
+    # Set page config once
     st.set_page_config(
         page_title=APP_NAME,
-        page_icon="📊",
+        page_icon="✈️",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
+    # 1. Apply Enterprise Styling (CSS) - Uses updated COLORS
     apply_enterprise_styling()
-    model = load_model()
     
+    # 2. Get Configuration
+    host, token, model_uri = get_config()
+    
+    # 3. Load Model
+    model = load_model(host, token, model_uri)
+    
+    # 4. Render Sidebar
+    render_sidebar(model, st.session_state["theme"])
+    
+    # 5. Render Header
     render_enterprise_header()
-    render_sidebar(model)
+
+    # 6. Render Main Content
+    render_kpi_dashboard(st.session_state["role"])
     
-    render_kpi_dashboard()
-    render_prediction_interface(model)
-    render_analytics_dashboard()
-    render_feature_importance()
+    # 7. Render Advanced Visualizations
+    render_advanced_visualizations(st.session_state["role"])
     
-    # Professional Footer
-    st.markdown("---")
-    st.markdown(f"""
-    <div style="text-align: center; padding: 2rem 0; color: {COLORS['GRAY_DARK']}; font-size: 0.85rem;">
-        <p style="margin: 0.25rem 0;">Apex Logistics Operations Intelligence Platform</p>
-        <p style="margin: 0.25rem 0; opacity: 0.7;">Confidential & Proprietary | © 2025 Apex Logistics, Inc.</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # 8. Render Prediction Interface
+    render_prediction_interface(model, st.session_state["role"])
+    
+    # Render footer information if needed (currently hidden by CSS)
+    if DEBUG_MODE:
+        st.sidebar.caption(f"Host: {host[:10]}...")
+        st.sidebar.caption(f"Model URI: {model_uri}")
+        st.sidebar.caption(f"Model Loaded: {bool(model)}")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.critical(f"Application error: {str(e)}")
-        logger.critical(traceback.format_exc())
-        st.error("System Error: Please contact system administrator.")
-        if DEBUG_MODE:
-            st.exception(e)
+        logger.error(f"Fatal application error: {str(e)}")
+        st.error(f"A fatal application error occurred. Check logs for details. Error: {str(e)}")
