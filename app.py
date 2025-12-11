@@ -1075,8 +1075,58 @@ def render_geospatial_map(dep1: int, dep2: int):
         
         st.pydeck_chart(r)
     else:
-        # Fallback to simple Plotly scattergeo
-        st.info("Interactive 3D Map requires PyDeck. Showing static view.")
+        # Plotly scattergeo fallback
+        fig = go.Figure()
+        
+        # Add facility markers
+        lats = [f["lat"] for f in FACILITIES.values()]
+        lons = [f["lon"] for f in FACILITIES.values()]
+        names = [f["name"] for f in FACILITIES.values()]
+        
+        fig.add_trace(go.Scattergeo(
+            lon=lons,
+            lat=lats,
+            text=names,
+            mode='markers+text',
+            marker=dict(size=10, color=COLORS['NAVY'], line=dict(width=2, color=COLORS['GOLD'])),
+            textposition="top center",
+            textfont=dict(size=10, color=COLORS['TEXT_PRIMARY']),
+            name='Hubs'
+        ))
+        
+        # Add route lines
+        for arc in arcs_data:
+            is_active = "color" in arc
+            fig.add_trace(go.Scattergeo(
+                lon=[arc["source"][0], arc["target"][0]],
+                lat=[arc["source"][1], arc["target"][1]],
+                mode='lines',
+                line=dict(
+                    width=arc["value"] / 2 if not is_active else 4,
+                    color=COLORS['GOLD'] if is_active else COLORS['NAVY_LIGHT']
+                ),
+                opacity=0.8 if is_active else 0.4,
+                showlegend=False
+            ))
+        
+        fig.update_layout(
+            geo=dict(
+                projection_type='natural earth',
+                showland=True,
+                landcolor=COLORS['GRAY_LIGHT'],
+                coastlinecolor=COLORS['GRAY_MEDIUM'],
+                showocean=True,
+                oceancolor='#E3F2FD' if st.session_state["theme"] == "day" else '#1A237E',
+                showcountries=True,
+                countrycolor=COLORS['GRAY_MEDIUM']
+            ),
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         
 def render_sankey_diagram():
     """Render Sankey diagram of Shipment Flows."""
