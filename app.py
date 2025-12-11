@@ -1088,10 +1088,11 @@ def render_geospatial_map(dep1: int, dep2: int):
             lat=lats,
             text=names,
             mode='markers+text',
-            marker=dict(size=10, color=COLORS['NAVY'], line=dict(width=2, color=COLORS['GOLD'])),
+            marker=dict(size=12, color=COLORS['GOLD'], line=dict(width=2, color=COLORS['WHITE'])),
             textposition="top center",
-            textfont=dict(size=10, color=COLORS['TEXT_PRIMARY']),
-            name='Hubs'
+            textfont=dict(size=9, color=COLORS['TEXT_PRIMARY']),
+            name='Hubs',
+            hoverinfo='text'
         ))
         
         # Add route lines
@@ -1102,27 +1103,38 @@ def render_geospatial_map(dep1: int, dep2: int):
                 lat=[arc["source"][1], arc["target"][1]],
                 mode='lines',
                 line=dict(
-                    width=arc["value"] / 2 if not is_active else 4,
+                    width=3 if is_active else 1.5,
                     color=COLORS['GOLD'] if is_active else COLORS['NAVY_LIGHT']
                 ),
-                opacity=0.8 if is_active else 0.4,
-                showlegend=False
+                opacity=1.0 if is_active else 0.5,
+                showlegend=False,
+                hoverinfo='skip'
             ))
+        
+        # Configure the map
+        is_day_mode = st.session_state.get("theme", "day") == "day"
         
         fig.update_layout(
             geo=dict(
-                projection_type='natural earth',
+                projection_type='orthographic',
                 showland=True,
-                landcolor=COLORS['GRAY_LIGHT'],
-                coastlinecolor=COLORS['GRAY_MEDIUM'],
+                landcolor='rgb(243, 243, 243)' if is_day_mode else 'rgb(30, 30, 30)',
+                coastlinecolor='rgb(204, 204, 204)' if is_day_mode else 'rgb(100, 100, 100)',
+                coastlinewidth=1,
                 showocean=True,
-                oceancolor='#E3F2FD' if st.session_state["theme"] == "day" else '#1A237E',
+                oceancolor='rgb(230, 245, 255)' if is_day_mode else 'rgb(15, 23, 42)',
                 showcountries=True,
-                countrycolor=COLORS['GRAY_MEDIUM']
+                countrycolor='rgb(204, 204, 204)' if is_day_mode else 'rgb(71, 85, 105)',
+                countrywidth=0.5,
+                showlakes=True,
+                lakecolor='rgb(230, 245, 255)' if is_day_mode else 'rgb(15, 23, 42)',
+                bgcolor='rgba(0,0,0,0)',
+                center=dict(lat=20, lon=0),
+                projection_scale=1.0
             ),
             margin=dict(l=0, r=0, t=0, b=0),
             paper_bgcolor='rgba(0,0,0,0)',
-            height=400,
+            height=450,
             showlegend=False
         )
         
